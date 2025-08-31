@@ -93,7 +93,7 @@ Supply the data arrays at the configured **Source** paths. Each group reads its 
     "ok": true,
     "counts": { "inserted": 42, "updated": 0, "errors": 0, "skipped": 0 },
     "tables": {
-      "Train_Position": { "inserted": 42, "updated": 0, "errors": 0, "skipped": 0, "total": 42 }
+      "table": { "inserted": 42, "updated": 0, "errors": 0, "skipped": 0, "total": 42 }
     },
     "timings": { "msOpen": 2, "msExec": 18, "msTotal": 22 }
   }
