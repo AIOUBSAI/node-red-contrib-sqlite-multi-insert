@@ -124,13 +124,6 @@ Supply the data arrays at the configured **Source** paths. Each group reads its 
 * `UPSERT` and `RETURNING` require modern SQLite builds; the node falls back where possible.
 * Column and table names are sanitized (alphanumeric + underscore).
 
----
-
-## Changelog
-
-* **0.1.0** — First multi-table release. Per-table sources, mapping, conflict, returning; transaction modes; PRAGMAs.
-
----
 
 ## License
 
