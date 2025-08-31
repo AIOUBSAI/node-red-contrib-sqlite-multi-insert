@@ -1,6 +1,6 @@
 # node-red-contrib-sqlite-multi-insert
 
-**Multi-table** bulk INSERT/UPSERT for SQLite in Node-RED, with per-table sources, mapping, conflict strategies, optional returned rows, chunking, and transaction control — all without pre/post SQL.
+**Multi-table** bulk INSERT/UPSERT for SQLite in Node-RED, with per-table sources, mapping, conflict strategies, optional returned rows, chunking, and transaction control.
 
 > Successor to single-table insert nodes; this one lets you define **multiple tables** (“Groups”) in one node, each with its own data source and mapping.
 
@@ -106,45 +106,6 @@ Supply the data arrays at the configured **Source** paths. Each group reads its 
     { "action":"inserted", "id": 123, "data": { "name":"C12" } }
     ```
 * Optionally mirror the summary to `msg.payload` (editor toggle).
-
----
-
-## Examples
-
-### 1) Insert unique car positions (like your Layout example)
-
-Upstream, produce an array of `{ name }` objects (e.g., by parsing your Layout C\* columns). Then configure one group:
-
-* **Table**: `Train_Position`
-* **Source**: `msg.layoutCars`  (array like `[ { "name":"C1" }, ... ]`)
-* **Auto-map**: **On**
-* **Conflict**: `ignore`
-* **Return rows**: `inserted` → `msg.sqlite.Train_Position.rows`
-
-This will do:
-
-```sql
-INSERT OR IGNORE INTO Train_Position (name) VALUES (?)
-```
-
-### 2) UPSERT software variables
-
-* **Table**: `Software_Variables`
-* **Source**: `msg.vars`
-* **Auto-map**: **Off**
-* **Mapping**:
-
-  * column `name` ← path `name` (transform `trim`)
-  * column `variable_type` ← path `dataType` (transform `upper`)
-  * column `direction` ← path `direction` (transform `upper`)
-  * column `id_software` ← path `softwareId`
-* **Conflict**: `upsert`
-
-  * **keys**: `name, id_software`
-  * **update columns**: `variable_type, direction`
-* **Return rows**: `affected` → `flow.upserts.variables`
-
----
 
 ## Mapping Transforms
 
