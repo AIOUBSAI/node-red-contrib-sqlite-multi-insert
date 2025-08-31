@@ -1,6 +1,6 @@
 {
   "name": "node-red-contrib-sqlite-multi-insert",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Node-RED node for multi-table bulk INSERT/UPSERT into SQLite with per-table sources, mapping, conflict strategies, optional returning, and transaction control.",
   "keywords": [
     "node-red",
@@ -43,3 +43,4 @@
     "LICENSE"
   ]
 }
+
