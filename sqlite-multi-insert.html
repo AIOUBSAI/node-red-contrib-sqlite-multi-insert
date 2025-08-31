@@ -1,0 +1,420 @@
+<!-- sqlite-multi-insert.html -->
+<style>
+  .smi { --b: var(--nr-editor-border,#e3e3e3); --bg: var(--nr-editor-dialog-background,#fff); --muted: rgba(0,0,0,.6); }
+  .smi .row { margin: 10px 0; }
+  .smi label { display:block; font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px; }
+  .smi input[type="text"], .smi select, .smi textarea { width:100% !important; box-sizing:border-box; border:1px solid var(--b); border-radius:0px; padding:8px 10px; height:34px; background:var(--bg); }
+  .smi .card { border:1px solid var(--b); border-radius:0px; padding:10px 12px; background:var(--nr-editor-sidebar-background,#f8f9fb); }
+  .smi .inline { display:grid; gap:10px; }
+  @media (min-width: 980px){ .smi .inline.cols-2{ grid-template-columns:1fr 1fr; } .smi .inline.cols-3{ grid-template-columns:1fr 1fr 1fr; } }
+  .smi table { width:100%; border-collapse:collapse; }
+  .smi th,.smi td { border-bottom:1px solid var(--b); padding:6px 4px; }
+  .smi thead th { background: var(--nr-editor-button-background,#f6f6f6); font-weight:700; }
+  .smi .right { text-align:right; }
+  .smi .hint { font-size:12px; color: var(--muted); }
+  .smi .nr-disabled { opacity:.55; pointer-events:none; }
+  .smi .btn-link { background:transparent; border:none; color:var(--nr-primary-text-color,#c00); cursor:pointer; padding:0 6px; }
+</style>
+
+<script type="text/x-red" data-template-name="sqlite-multi-insert">
+  <div class="smi">
+    <!-- Name -->
+    <div class="row">
+      <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+      <input type="text" id="node-input-name" placeholder="sqlite-multi-insert">
+    </div>
+
+    <!-- Connection -->
+    <div class="row card">
+      <div class="inline cols-3">
+        <div>
+          <label><i class="fa fa-database"></i> Database path</label>
+          <input type="text" id="node-input-dbPath">
+          <input type="hidden" id="node-input-dbPathType">
+          <div class="hint">Types: str · msg · flow · global · env</div>
+        </div>
+        <div>
+          <label>PRAGMA: journal_mode WAL</label>
+          <label><input type="checkbox" id="node-input-pragWal"> Enable WAL</label>
+        </div>
+        <div>
+          <label>PRAGMA: synchronous</label>
+          <select id="node-input-pragSync">
+            <option value="">(default)</option>
+            <option value="OFF">OFF</option>
+            <option value="NORMAL">NORMAL</option>
+            <option value="FULL">FULL</option>
+            <option value="EXTRA">EXTRA</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <label>Extra PRAGMAs (optional; ; separated)</label>
+        <input type="text" id="node-input-pragExtra" placeholder="temp_store=MEMORY; cache_size=20000">
+      </div>
+    </div>
+
+    <!-- Transaction -->
+    <div class="row card">
+      <div class="inline cols-3">
+        <div>
+          <label><i class="fa fa-exchange"></i> Transaction mode</label>
+          <select id="node-input-txMode">
+            <option value="all">All tables in one transaction</option>
+            <option value="perTable">Each table in its own transaction</option>
+            <option value="off">Off</option>
+            <option value="chunk">Chunk (per row batches)</option>
+          </select>
+        </div>
+        <div>
+          <label>Chunk size</label>
+          <input type="text" id="node-input-txChunkSize" placeholder="500">
+        </div>
+        <div>
+          <label>On error</label>
+          <label><input type="checkbox" id="node-input-txContinue"> Continue on error</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Groups (per table) -->
+    <div class="row card">
+      <label><i class="fa fa-table"></i> Tables</label>
+      <table id="smi-groups">
+        <thead>
+          <tr>
+            <th style="width:180px">Table</th>
+            <th>Source</th>
+            <th style="width:120px">Auto-map</th>
+            <th style="width:140px">Conflict</th>
+            <th style="width:140px">Return</th>
+            <th style="width:120px" class="right">Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="hint" style="margin-top:6px">Each table can read from a different source (typed path / JSONata / msg/flow/global/env/str/num/bool/json) and has its own mapping/UPSERT.</div>
+      <div class="row">
+        <button class="red-ui-button" id="smi-add"><i class="fa fa-plus"></i> Add table</button>
+      </div>
+    </div>
+  </div>
+</script>
+
+<script type="text/x-red" data-help-name="sqlite-multi-insert">
+  <p><b>sqlite-multi-insert</b> — Multi-table SQLite bulk INSERT/UPSERT.</p>
+  <ul>
+    <li>No pre/post SQL.</li>
+    <li>Per-table source, mapping (auto or manual), conflict strategy and optional returning.</li>
+    <li>Transaction: all tables | per table | off | chunked.</li>
+  </ul>
+  <p>Outputs summary at <code>msg.sqlite</code> and, if enabled per table, returned rows at the configured path.</p>
+</script>
+
+<script type="text/javascript">
+(function(){
+  const NODE_TYPE = "sqlite-multi-insert";
+
+  const clone = (x)=> JSON.parse(JSON.stringify(x||{}));
+
+  function makeTyped($el, types, $typeField, defVal, defType){
+    $el.typedInput({ default:defType, types:types, typeField:$typeField });
+    if (defType) $el.typedInput('type', defType);
+    if (defVal !== undefined) $el.typedInput('value', defVal);
+  }
+
+  function renderGroups($tbody, groups){
+    $tbody.empty();
+    (groups||[]).forEach((g, idx)=>{
+      const srcLabel = `${g.sourceType || "msg"}:${g.source}`;
+      const retLabel = (g.ret && g.ret.mode !== "none") ? `${g.ret.mode} → ${g.ret.pathType || "msg"}:${g.ret.path}` : "(none)";
+      const $tr = $(`
+        <tr>
+          <td>${g.table || ""}</td>
+          <td title="${srcLabel}">${srcLabel.length>64 ? srcLabel.slice(0,64)+"…" : srcLabel}</td>
+          <td>${g.autoMap ? "yes" : "no"}</td>
+          <td>${(g.conflict && g.conflict.strategy) || "none"}</td>
+          <td>${retLabel}</td>
+          <td class="right">
+            <button class="red-ui-button red-ui-button-small edit"><i class="fa fa-pencil"></i></button>
+            <button class="red-ui-button red-ui-button-small delete"><i class="fa fa-trash"></i></button>
+          </td>
+        </tr>
+      `);
+      $(".edit", $tr).on("click", ()=> openGroupDialog($tbody, groups, idx));
+      $(".delete", $tr).on("click", ()=> { groups.splice(idx,1); renderGroups($tbody, groups); });
+      $tbody.append($tr);
+    });
+  }
+
+  function addMapRow($tbody, row){
+    const r = Object.assign({ column:"", srcType:"path", src:"", transform:"none" }, row||{});
+    const $tr = $(`
+      <tr>
+        <td><input type="text" class="smi-col" placeholder="column"></td>
+        <td><input type="text" class="smi-src"><input type="hidden" class="smi-srcType"></td>
+        <td>
+          <select class="smi-tx">
+            <option value="none">none</option>
+            <option value="trim">trim</option>
+            <option value="upper">upper</option>
+            <option value="lower">lower</option>
+            <option value="nz">nz</option>
+            <option value="bool01">bool01</option>
+            <option value="number">number</option>
+            <option value="string">string</option>
+          </select>
+        </td>
+        <td class="right">
+          <button class="red-ui-button red-ui-button-small smi-del"><i class="fa fa-trash"></i></button>
+        </td>
+      </tr>
+    `);
+    $(".smi-col",$tr).val(r.column);
+    const $src = $(".smi-src",$tr);
+    const $srcType = $(".smi-srcType",$tr);
+    $src.typedInput({
+      default: r.srcType || "path",
+      types: [{value:"path",label:"path",icon:"fa fa-dot-circle-o"}, "jsonata","msg","flow","global","env","str","num","bool","json"],
+      typeField: $srcType
+    });
+    $src.typedInput('type', r.srcType || "path");
+    $src.typedInput('value', r.src);
+    $(".smi-tx",$tr).val(r.transform || "none");
+    $(".smi-del",$tr).on("click", ()=> $tr.remove());
+    $tbody.append($tr);
+  }
+
+  function collectMapping($tbody){
+    const out = [];
+    $tbody.find("tr").each(function(){
+      const $tr = $(this);
+      const column = $(".smi-col",$tr).val().trim();
+      const src = $(".smi-src",$tr).typedInput('value');
+      const srcType = $(".smi-src",$tr).typedInput('type');
+      const transform = $(".smi-tx",$tr).val();
+      if (column) out.push({ column, srcType, src, transform });
+    });
+    return out;
+  }
+
+  function openGroupDialog($tbody, groups, index){
+    const isNew = (index == null);
+    const cur = isNew ? {
+      table:"", source:"payload", sourceType:"msg",
+      autoMap:true, mapping:[],
+      conflict:{ strategy:"none", keys:[], updateCols:[] },
+      ret:{ mode:"none", idCol:"id", path:"sqlite.rows", pathType:"msg" }
+    } : clone(groups[index]);
+
+    const $dlg = $(`
+      <div class="smi">
+        <div class="row inline cols-3">
+          <div>
+            <label>Table</label>
+            <input type="text" id="smi-f-table" placeholder="MyTable">
+          </div>
+          <div>
+            <label>Source</label>
+            <input type="text" id="smi-f-src">
+            <input type="hidden" id="smi-f-srcType">
+          </div>
+          <div>
+            <label>Auto-map</label>
+            <label><input type="checkbox" id="smi-f-auto"> Enable</label>
+          </div>
+        </div>
+
+        <div class="row card" id="smi-map-card">
+          <label>Mapping</label>
+          <table id="smi-map">
+            <thead>
+              <tr>
+                <th style="width:180px">Column</th>
+                <th>Source</th>
+                <th style="width:160px">Transform</th>
+                <th style="width:84px" class="right">Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="row">
+            <button class="red-ui-button" id="smi-map-add"><i class="fa fa-plus"></i> Add column</button>
+          </div>
+        </div>
+
+        <div class="row card">
+          <div class="inline cols-3">
+            <div>
+              <label>Conflict</label>
+              <select id="smi-f-cs">
+                <option value="none">none</option>
+                <option value="ignore">OR IGNORE</option>
+                <option value="replace">OR REPLACE</option>
+                <option value="upsert">UPSERT</option>
+              </select>
+            </div>
+            <div id="smi-f-keys-wrap">
+              <label>UPSERT keys (comma)</label>
+              <input type="text" id="smi-f-keys" placeholder="key1, key2">
+            </div>
+            <div id="smi-f-upd-wrap">
+              <label>UPSERT update columns (comma)</label>
+              <input type="text" id="smi-f-upd" placeholder="colA, colB">
+            </div>
+          </div>
+        </div>
+
+        <div class="row card">
+          <div class="inline cols-3">
+            <div>
+              <label>Return rows</label>
+              <select id="smi-f-retMode">
+                <option value="none">(don’t return rows)</option>
+                <option value="inserted">Inserted</option>
+                <option value="affected">Affected</option>
+              </select>
+            </div>
+            <div>
+              <label>ID column</label>
+              <input type="text" id="smi-f-retId" placeholder="id">
+            </div>
+            <div>
+              <label>Return path</label>
+              <input type="text" id="smi-f-retPath" placeholder="sqlite.MyTable.rows">
+              <input type="hidden" id="smi-f-retPathType">
+            </div>
+          </div>
+        </div>
+      </div>
+    `).appendTo("body").dialog({
+      modal:true,
+      width: Math.floor($(window).width()*0.88),
+      height: Math.floor($(window).height()*0.88),
+      title: isNew ? "Add table" : "Edit table",
+      buttons: [
+        { text:"Cancel", click(){ $(this).dialog("destroy").remove(); } },
+        { text:"Save", class:"primary", click(){
+            const tbl = $("#smi-f-table").val().trim();
+            if (!tbl){ $("#smi-f-table").addClass("input-error"); return; }
+            const out = {
+              table: tbl,
+              source: $("#smi-f-src").typedInput('value'),
+              sourceType: $("#smi-f-src").typedInput('type'),
+              autoMap: $("#smi-f-auto").is(":checked"),
+              mapping: collectMapping($("#smi-map tbody")),
+              conflict: {
+                strategy: $("#smi-f-cs").val(),
+                keys: String($("#smi-f-keys").val()||"").split(",").map(s=>s.trim()).filter(Boolean),
+                updateCols: String($("#smi-f-upd").val()||"").split(",").map(s=>s.trim()).filter(Boolean)
+              },
+              ret: {
+                mode: $("#smi-f-retMode").val(),
+                idCol: $("#smi-f-retId").val().trim() || "id",
+                path: $("#smi-f-retPath").typedInput('value'),
+                pathType: $("#smi-f-retPath").typedInput('type')
+              }
+            };
+            if (isNew) groups.push(out); else groups[index] = out;
+            renderGroups($tbody, groups);
+            $(this).dialog("destroy").remove();
+        }}
+      ],
+      close(){ $(this).remove(); }
+    });
+
+    // init
+    $("#smi-f-table").val(cur.table || "");
+    makeTyped($("#smi-f-src"), ["msg","flow","global","jsonata","str","num","bool","json","env"], $("#smi-f-srcType"), cur.source || "payload", cur.sourceType || "msg");
+    $("#smi-f-auto").prop("checked", !!cur.autoMap);
+
+    const $mapBody = $("#smi-map tbody"); $mapBody.empty();
+    (cur.mapping || []).forEach(m => addMapRow($mapBody, m));
+    $("#smi-map-add").on("click", ()=> addMapRow($mapBody));
+
+    const toggleMap = ()=> $("#smi-map-card").toggle(!$("#smi-f-auto").is(":checked"));
+    $("#smi-f-auto").on("change", toggleMap); toggleMap();
+
+    $("#smi-f-cs").val(cur?.conflict?.strategy || "none");
+    $("#smi-f-keys").val((cur?.conflict?.keys || []).join(", "));
+    $("#smi-f-upd").val((cur?.conflict?.updateCols || []).join(", "));
+
+    const toggleUpsert = ()=> {
+      const on = $("#smi-f-cs").val() === "upsert";
+      $("#smi-f-keys-wrap, #smi-f-upd-wrap").toggle(on);
+    };
+    $("#smi-f-cs").on("change", toggleUpsert); toggleUpsert();
+
+    $("#smi-f-retMode").val(cur?.ret?.mode || "none");
+    $("#smi-f-retId").val(cur?.ret?.idCol || "id");
+    makeTyped($("#smi-f-retPath"), ["msg","flow","global"], $("#smi-f-retPathType"),
+      (cur?.ret?.path || `sqlite.${cur.table || "Table"}.rows`), (cur?.ret?.pathType || "msg"));
+  }
+
+  RED.nodes.registerType(NODE_TYPE, {
+    category: 'storage',
+    color: '#E6F2FF',
+    icon: 'font-awesome/fa-database',
+    paletteLabel: 'sqlite multi insert',
+    defaults: {
+      name: { value:"" },
+      dbPath: { value:"" },
+      dbPathType: { value:"str" },
+      pragmas: { value: { wal:false, sync:"", extra:"" } },
+      tx: { value: { mode:"all", chunkSize:500, continueOnError:false } },
+      groups: { value: [] },
+      emitPayloadSummary: { value: false }
+    },
+    inputs: 1,
+    outputs: 1,
+    label: function(){ return this.name || 'sqlite-multi-insert'; },
+
+    oneditprepare: function(){
+      const self = this;
+
+      // DB typed
+      (function(){
+        const $p = $("#node-input-dbPath"), $t=$("#node-input-dbPathType");
+        $p.typedInput({ default:self.dbPathType||"str", types:["str","msg","flow","global","env"], typeField:$t });
+        $p.typedInput('type', self.dbPathType || "str");
+        $p.typedInput('value', self.dbPath || "");
+      })();
+
+      // PRAGMAs
+      $("#node-input-pragWal").prop("checked", !!(self.pragmas && self.pragmas.wal));
+      $("#node-input-pragSync").val((self.pragmas && self.pragmas.sync) || "");
+      $("#node-input-pragExtra").val((self.pragmas && self.pragmas.extra) || "");
+
+      // TX
+      $("#node-input-txMode").val(self.tx?.mode || "all");
+      $("#node-input-txChunkSize").val(self.tx?.chunkSize || 500);
+      $("#node-input-txContinue").prop("checked", !!self.tx?.continueOnError);
+
+      // Groups
+      const $tbody = $("#smi-groups tbody");
+      const groups = Array.isArray(self.groups) ? clone(self.groups) : [];
+      renderGroups($tbody, groups);
+
+      $("#smi-add").on("click", ()=> openGroupDialog($tbody, groups, null));
+
+      this._collect = () => {
+        return groups;
+      };
+    },
+
+    oneditsave: function(){
+      this.pragmas = {
+        wal: $("#node-input-pragWal").is(":checked"),
+        sync: $("#node-input-pragSync").val() || "",
+        extra: $("#node-input-pragExtra").val() || ""
+      };
+      this.tx = {
+        mode: $("#node-input-txMode").val(),
+        chunkSize: Number($("#node-input-txChunkSize").val() || 500),
+        continueOnError: $("#node-input-txContinue").is(":checked")
+      };
+      this.groups = this._collect ? this._collect() : [];
+    }
+  });
+})();
+</script>
